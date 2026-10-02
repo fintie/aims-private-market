@@ -1,6 +1,6 @@
 from flask import Flask, render_template_string, request, Response
 from datetime import datetime, timezone
-import csv, io, os, smtplib
+import csv, io, os, smtplib, requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -21,6 +21,63 @@ PUBLIC_DATA = [
  {'company':'Clarity private-market feed','platform':'Clarity (Hiive)','product':'Market Data / Partner APIs','deal_type':'Licensed data feed','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Partner APIs support private-market opportunities, market data and liquidity workflows','discount':None,'activity':'Credential required','updated':'Configure CLARITY_API_KEY / partner feed','source':'https://www.clarity.com/partner-solutions'},
  {'company':'EquityZen private-market feed','platform':'EquityZen','product':'Marketplace','deal_type':'Licensed/account data','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'No undocumented API assumed','discount':None,'activity':'Access required','updated':'Configure approved commercial feed when available','source':'https://equityzen.com/'},
 ]
+def npm_status():
+    key = os.getenv('NPM_API_KEY', '').strip()
+    if not key:
+        return {'configured': False, 'auth': 'not tested', 'message': 'NPM_API_KEY is not configured in the service environment.'}
+
+    # Nasdaq Data Link does not expose a universal endpoint that lists every
+    # premium entitlement for an API key. Test authentication against a known
+    # public Data Link table; NPM entitlement is tested separately when an NPM
+    # table code is configured.
+    status = {'configured': True, 'auth': 'unknown', 'npm_entitlement': 'unknown'}
+    try:
+        auth_url = 'https://data.nasdaq.com/api/v3/datatables/SHARADAR/TICKERS.json'
+        r = requests.get(auth_url, params={'api_key': key, 'qopts.per_page': 1}, timeout=12)
+        if r.status_code == 200:
+            status['auth'] = 'valid'
+        elif r.status_code in (400, 401, 403):
+            status['auth'] = 'rejected'
+            try:
+                status['message'] = r.json().get('quandl_error', {}).get('message', 'Nasdaq rejected the authentication request.')
+            except Exception:
+                status['message'] = 'Nasdaq rejected the authentication request.'
+            return status
+        else:
+            status['auth'] = 'service error'
+            status['message'] = f'Nasdaq returned HTTP {r.status_code}.'
+            return status
+
+        table = os.getenv('NPM_TABLE_CODE', '').strip().strip('/')
+        if not table:
+            status['message'] = 'API key authenticated. Set NPM_TABLE_CODE after NPM/Daq provides the entitled table code.'
+            return status
+
+        parts = table.split('/')
+        if len(parts) != 2:
+            status['npm_entitlement'] = 'configuration error'
+            status['message'] = 'NPM_TABLE_CODE must use DATABASE/TABLE format.'
+            return status
+
+        meta_url = f'https://data.nasdaq.com/api/v3/datatables/{parts[0]}/{parts[1]}/metadata.json'
+        m = requests.get(meta_url, params={'api_key': key}, timeout=12)
+        if m.status_code == 200:
+            payload = m.json().get('datatable', {})
+            status['npm_entitlement'] = 'available'
+            status['table'] = table
+            status['table_name'] = payload.get('name')
+            status['refreshed_at'] = (payload.get('status') or {}).get('refreshed_at') or payload.get('refreshed_at')
+        elif m.status_code == 403:
+            status['npm_entitlement'] = 'not entitled'
+            status['message'] = 'The API key is valid but Nasdaq reports no permission for the configured NPM table.'
+        else:
+            status['npm_entitlement'] = 'error'
+            status['message'] = f'NPM metadata request returned HTTP {m.status_code}.'
+    except requests.RequestException as e:
+        status['auth'] = 'network error'
+        status['message'] = str(e)
+    return status
+
 def rows():
     # Provider adapters intentionally fall back to sample/placeholder rows until licensed credentials are supplied.
     return PUBLIC_DATA
@@ -37,6 +94,10 @@ body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background
 
 @app.route('/health')
 def health(): return {'ok': True, 'service': 'aims-private-market'}
+
+@app.route('/npm-status')
+def npm_status_route():
+    return npm_status()
 
 @app.route('/')
 def home(): return render_template_string(PAGE,data=rows(),recipient=', '.join(RECIPIENTS),money=money)
