@@ -5,18 +5,25 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 app = Flask(__name__)
-RECIPIENT = os.getenv('REPORT_RECIPIENT', 'nickq@aims.com.au')
+DEFAULT_RECIPIENTS = ['nickq@aims.com.au', 'nickc@aims.com.au', 'augustine.goh@aims.com.au']
+RECIPIENTS = [x.strip() for x in os.getenv('REPORT_RECIPIENTS', ','.join(DEFAULT_RECIPIENTS)).split(',') if x.strip()]
 
-SAMPLE = [
- {'company':'Databricks','platform':'Forge','product':'Forge Data / Marketplace','deal_type':'Secondary','share_class':'Common','price':268.50,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series L-2','discount':None,'activity':'High','updated':'Sample / replace with API','source':'Forge'},
- {'company':'SpaceX','platform':'NPM','product':'Daq / NPM Price','deal_type':'Pricing intelligence','share_class':'Common','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'—','discount':None,'activity':'—','updated':'Awaiting API credentials','source':'NPM'},
- {'company':'OpenAI','platform':'Clarity (Hiive)','product':'Private Market / Partner API','deal_type':'Secondary / IOI','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'—','discount':None,'activity':'—','updated':'Awaiting partner feed','source':'Clarity'},
- {'company':'Stripe','platform':'EquityZen','product':'Single-company investment','deal_type':'Offering','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'—','discount':None,'activity':'—','updated':'Awaiting licensed feed','source':'EquityZen'},
+PUBLIC_DATA = [
+ {'company':'Databricks','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':268.50,'bid':None,'ask':None,'deal_size':None,'valuation':201640000000,'last_funding':'Series L-2 — 13 Aug 2026 — $190B — $253.00 PPS','discount':None,'activity':'High','updated':'Forge Price updated 28 Sep 2026','source':'https://forgeglobal.com/databricks_stock/'},
+ {'company':'Stripe','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':72.45,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Tender Offer 3 — 24 Feb 2026 — $159B — $62.47 PPS','discount':None,'activity':'Limited','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'Saronic','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':34.29,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series D — 31 Mar 2026 — $9.25B — $27.45 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'Polymarket','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':137.70,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series E — 26 Mar 2026 — $15B — $144.08 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'Replit','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':259.43,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series D — 11 Mar 2026 — $9B — $248.26 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'SambaNova Systems','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':69.01,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series F Voting — 8 Jul 2026 — $11B — $127.10 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'Ramp','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':125.54,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series F — 4 Jun 2026 — $44B — $120.00 PPS','discount':None,'activity':'Medium','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'Rippling','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':47.28,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Tender Offer 1 — 9 May 2025 — $16.8B — $52.00 PPS','discount':None,'activity':'Low','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+ {'company':'NPM / Daq feed','platform':'NPM','product':'Daq Premium API','deal_type':'Licensed data feed','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'API provides primary rounds/history plus premium bid/offer and reported trades','discount':None,'activity':'Credential required','updated':'Configure NPM_API_KEY / licensed feed','source':'https://www.nasdaqprivatemarket.com/data-intelligence/'},
+ {'company':'Clarity private-market feed','platform':'Clarity (Hiive)','product':'Market Data / Partner APIs','deal_type':'Licensed data feed','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Partner APIs support private-market opportunities, market data and liquidity workflows','discount':None,'activity':'Credential required','updated':'Configure CLARITY_API_KEY / partner feed','source':'https://www.clarity.com/partner-solutions'},
+ {'company':'EquityZen private-market feed','platform':'EquityZen','product':'Marketplace','deal_type':'Licensed/account data','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'No undocumented API assumed','discount':None,'activity':'Access required','updated':'Configure approved commercial feed when available','source':'https://equityzen.com/'},
 ]
-
 def rows():
     # Provider adapters intentionally fall back to sample/placeholder rows until licensed credentials are supplied.
-    return SAMPLE
+    return PUBLIC_DATA
 
 def money(v):
     return '—' if v is None else '${:,.2f}'.format(v)
@@ -32,7 +39,7 @@ body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background
 def health(): return {'ok': True, 'service': 'aims-private-market'}
 
 @app.route('/')
-def home(): return render_template_string(PAGE,data=rows(),recipient=RECIPIENT,money=money)
+def home(): return render_template_string(PAGE,data=rows(),recipient=', '.join(RECIPIENTS),money=money)
 
 @app.route('/export.csv')
 def export_csv():
@@ -47,10 +54,10 @@ def send():
     host=os.getenv('SMTP_HOST'); user=os.getenv('SMTP_USER'); password=os.getenv('SMTP_PASSWORD'); sender=os.getenv('SMTP_FROM',user)
     port=int(os.getenv('SMTP_PORT','587'))
     if not all([host,user,password,sender]): return {'ok':False,'error':'SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM/SMTP_USER are required'},400
-    msg=MIMEMultipart('alternative'); msg['Subject']=f"AIMS Private Market Deal Monitor — {datetime.now().strftime('%d %b %Y')}"; msg['From']=sender; msg['To']=RECIPIENT
+    msg=MIMEMultipart('alternative'); msg['Subject']=f"AIMS Private Market Deal Monitor — {datetime.now().strftime('%d %b %Y')}"; msg['From']=sender; msg['To']=', '.join(RECIPIENTS)
     msg.attach(MIMEText(email_html(rows()),'html'))
     with smtplib.SMTP(host,port,timeout=20) as s:
-        s.starttls(); s.login(user,password); s.sendmail(sender,[RECIPIENT],msg.as_string())
-    return {'ok':True,'sent_to':RECIPIENT}
+        s.starttls(); s.login(user,password); s.sendmail(sender,RECIPIENTS,msg.as_string())
+    return {'ok':True,'sent_to':RECIPIENTS}
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','8080')),debug=False)
