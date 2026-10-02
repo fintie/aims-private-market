@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: aims-private-market
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
+    envVars:
+      - key: REPORT_RECIPIENT
+        value: nickq@aims.com.au
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: NPM_API_KEY
+        sync: false
+      - key: FORGE_API_KEY
+        sync: false
+      - key: CLARITY_API_KEY
+        sync: false
+      - key: EQUITYZEN_API_KEY
+        sync: false
