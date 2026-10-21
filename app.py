@@ -1,6 +1,6 @@
 from flask import Flask, render_template_string, request, Response
 from datetime import datetime, timezone
-import csv, io, os, smtplib, requests
+import csv, io, json, os, smtplib, requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -17,9 +17,7 @@ PUBLIC_DATA = [
  {'company':'SambaNova Systems','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':69.01,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series F Voting — 8 Jul 2026 — $11B — $127.10 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
  {'company':'Ramp','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':125.54,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series F — 4 Jun 2026 — $44B — $120.00 PPS','discount':None,'activity':'Medium','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
  {'company':'Rippling','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':47.28,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Tender Offer 1 — 9 May 2025 — $16.8B — $52.00 PPS','discount':None,'activity':'Low','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'NPM / Daq feed','platform':'NPM','product':'Daq Premium API','deal_type':'Licensed data feed','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'API provides primary rounds/history plus premium bid/offer and reported trades','discount':None,'activity':'Credential required','updated':'Configure NPM_API_KEY / licensed feed','source':'https://www.nasdaqprivatemarket.com/data-intelligence/'},
- {'company':'Clarity private-market feed','platform':'Clarity (Hiive)','product':'Market Data / Partner APIs','deal_type':'Licensed data feed','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Partner APIs support private-market opportunities, market data and liquidity workflows','discount':None,'activity':'Credential required','updated':'Configure CLARITY_API_KEY / partner feed','source':'https://www.clarity.com/partner-solutions'},
- {'company':'EquityZen private-market feed','platform':'EquityZen','product':'Marketplace','deal_type':'Licensed/account data','share_class':'—','price':None,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'No undocumented API assumed','discount':None,'activity':'Access required','updated':'Configure approved commercial feed when available','source':'https://equityzen.com/'},
+
 ]
 def npm_status():
     key = os.getenv('NPM_API_KEY', '').strip()
@@ -78,22 +76,56 @@ def npm_status():
         status['message'] = str(e)
     return status
 
+# EquityZen is the primary source. Public references are company coverage,
+# not offers or price quotes. Approved exports can supply actual deal terms.
+PRIMARY_SOURCE = 'EquityZen'
+EQUITYZEN_REFERENCES = [
+    dict(company=company, platform=PRIMARY_SOURCE, product='Single-company investment',
+         deal_type='Company reference', share_class='—', price=None, bid=None,
+         ask=None, deal_size=None, valuation=None, last_funding='—', discount=None,
+         activity='Terms unavailable', updated='Public company reference; no live quote',
+         source='https://equityzen.com/multi-company/')
+    for company in ('Databricks', 'Stripe')
+]
+
 def rows():
-    # Provider adapters intentionally fall back to sample/placeholder rows until licensed credentials are supplied.
-    return PUBLIC_DATA
+    feed_path = os.getenv('EQUITYZEN_DATA_FILE', '').strip()
+    primary = EQUITYZEN_REFERENCES
+    if feed_path:
+        with open(feed_path, encoding='utf-8') as feed:
+            records = json.load(feed)
+        if not isinstance(records, list):
+            raise ValueError('EQUITYZEN_DATA_FILE must contain a JSON array of company records')
+        primary = []
+        for record in records:
+            if not isinstance(record, dict) or not isinstance(record.get('company'), str) or not record['company'].strip():
+                raise ValueError('Each company record must include a company name')
+            if 'equityzen' in record['company'].casefold():
+                continue
+            row = {key: None for key in PUBLIC_DATA[0]}
+            row.update(record)
+            row['platform'] = PRIMARY_SOURCE
+            row['product'] = 'Single-company investment'
+            row['deal_type'] = record.get('deal_type') or 'Private-market investment'
+            row['activity'] = record.get('activity') or '—'
+            row['updated'] = record.get('updated') or 'Timestamp unavailable'
+            row['share_class'] = record.get('share_class') or '—'
+            primary.append(row)
+    covered = {row['company'].strip().casefold() for row in primary}
+    return primary + [row for row in PUBLIC_DATA if row['company'].casefold() not in covered]
 
 def money(v):
     return '—' if v is None else '${:,.2f}'.format(v)
 
 def email_html(data):
-    trs=''.join(f"<tr><td>{r['company']}</td><td>{r['platform']}</td><td>{r['product']}</td><td>{r['deal_type']}</td><td>{money(r['price'])}</td><td>{money(r['bid'])}</td><td>{money(r['ask'])}</td><td>{r['activity']}</td><td>{r['updated']}</td></tr>" for r in data)
-    return f'''<h2>AIMS Private Market Deal Monitor</h2><p>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p><table border="1" cellpadding="7" cellspacing="0" style="border-collapse:collapse;font-family:Arial;font-size:12px"><tr style="background:#10243e;color:white"><th>Company</th><th>Platform</th><th>Product</th><th>Deal Type</th><th>Price</th><th>Bid</th><th>Ask</th><th>Activity</th><th>Updated</th></tr>{trs}</table><p><small>Private-market prices may be indicative. Verify source, share class, transfer restrictions and timestamp before use.</small></p>'''
+    trs=''.join(f"<tr><td>{r['company']}</td><td>{r['deal_type']}</td><td>{money(r['price'])}</td><td>{money(r['bid'])}</td><td>{money(r['ask'])}</td><td>{r['activity']}</td><td>{r['updated']}</td></tr>" for r in data)
+    return f'''<h2>Private Market Deal Monitor</h2><p>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p><table border="1" cellpadding="7" cellspacing="0" style="border-collapse:collapse;font-family:Arial;font-size:12px"><tr style="background:#10243e;color:white"><th>Company</th><th>Deal Type</th><th>Price</th><th>Bid</th><th>Ask</th><th>Activity</th><th>Updated</th></tr>{trs}</table><p><small>Private-market prices may be indicative. Verify source, share class, transfer restrictions and timestamp before use.</small></p>'''
 
-PAGE='''<!doctype html><html><head><meta charset="utf-8"><title>AIMS Private Market Monitor</title><style>
-body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background:#10243e;color:white;padding:24px 34px}.wrap{padding:24px 34px}.cards{display:flex;gap:14px;margin-bottom:18px}.card{background:white;padding:16px;border-radius:10px;box-shadow:0 1px 5px #ccd5e0;min-width:180px}.n{font-size:26px;font-weight:bold}.actions{margin:14px 0}.btn{background:#286cf5;color:white;border:0;border-radius:6px;padding:10px 14px;text-decoration:none;margin-right:8px}table{width:100%;border-collapse:collapse;background:white;font-size:13px}th{background:#10243e;color:white;text-align:left;padding:10px}td{padding:9px;border-bottom:1px solid #e5e7eb}.note{color:#64748b;font-size:12px;margin-top:14px}</style></head><body><div class="top"><h1>AIMS Private Market Deal Monitor</h1><div>Clarity/Hiive · Nasdaq Private Market · Forge · EquityZen</div></div><div class="wrap"><div class="cards"><div class="card"><div class="n">{{data|length}}</div>Rows</div><div class="card"><div class="n">4</div>Platforms</div></div><div class="actions"><a class="btn" href="/export.csv">Export CSV</a><a class="btn" href="/email-preview">Email Preview</a></div><table><tr><th>Company</th><th>Platform</th><th>Product</th><th>Deal Type</th><th>Share Class</th><th>Price</th><th>Bid</th><th>Ask</th><th>Deal Size</th><th>Valuation</th><th>Activity</th><th>Updated</th></tr>{% for r in data %}<tr><td>{{r.company}}</td><td>{{r.platform}}</td><td>{{r.product}}</td><td>{{r.deal_type}}</td><td>{{r.share_class}}</td><td>{{money(r.price)}}</td><td>{{money(r.bid)}}</td><td>{{money(r.ask)}}</td><td>{{money(r.deal_size)}}</td><td>{{money(r.valuation)}}</td><td>{{r.activity}}</td><td>{{r.updated}}</td></tr>{% endfor %}</table><div class="note">MVP uses placeholders where licensed API credentials are not configured. Do not treat indicative private-market data as an executable quote.</div></div></body></html>'''
+PAGE='''<!doctype html><html><head><meta charset="utf-8"><title>Private Market Monitor</title><style>
+body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background:#10243e;color:white;padding:24px 34px}.wrap{padding:24px 34px}.cards{display:flex;gap:14px;margin-bottom:18px}.card{background:white;padding:16px;border-radius:10px;box-shadow:0 1px 5px #ccd5e0;min-width:180px}.n{font-size:26px;font-weight:bold}.actions{margin:14px 0}.btn{background:#286cf5;color:white;border:0;border-radius:6px;padding:10px 14px;text-decoration:none;margin-right:8px}table{width:100%;border-collapse:collapse;background:white;font-size:13px}th{background:#10243e;color:white;text-align:left;padding:10px}td{padding:9px;border-bottom:1px solid #e5e7eb}.note{color:#64748b;font-size:12px;margin-top:14px}</style></head><body><div class="top"><h1>Private Market Deal Monitor</h1><div>Private company investment opportunities</div></div><div class="wrap"><div class="cards"><div class="card"><div class="n">{{data|length}}</div>Rows</div></div><div class="actions"><a class="btn" href="/export.csv">Export CSV</a><a class="btn" href="/email-preview">Email Preview</a></div><table><tr><th>Company</th><th>Deal Type</th><th>Share Class</th><th>Price</th><th>Bid</th><th>Ask</th><th>Deal Size</th><th>Valuation</th><th>Activity</th><th>Updated</th></tr>{% for r in data %}<tr><td>{{r.company}}</td><td>{{r.deal_type}}</td><td>{{r.share_class}}</td><td>{{money(r.price)}}</td><td>{{money(r.bid)}}</td><td>{{money(r.ask)}}</td><td>{{money(r.deal_size)}}</td><td>{{money(r.valuation)}}</td><td>{{r.activity}}</td><td>{{r.updated}}</td></tr>{% endfor %}</table><div class="note">Company references are not active offers. Prices are unavailable where approved deal data has not been supplied. Do not treat indicative private-market data as an executable quote.</div></div></body></html>'''
 
 @app.route('/health')
-def health(): return {'ok': True, 'service': 'aims-private-market'}
+def health(): return {'ok': True, 'service': 'private-market'}
 
 @app.route('/npm-status')
 def npm_status_route():
@@ -115,7 +147,7 @@ def send():
     host=os.getenv('SMTP_HOST'); user=os.getenv('SMTP_USER'); password=os.getenv('SMTP_PASSWORD'); sender=os.getenv('SMTP_FROM',user)
     port=int(os.getenv('SMTP_PORT','587'))
     if not all([host,user,password,sender]): return {'ok':False,'error':'SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM/SMTP_USER are required'},400
-    msg=MIMEMultipart('alternative'); msg['Subject']=f"AIMS Private Market Deal Monitor — {datetime.now().strftime('%d %b %Y')}"; msg['From']=sender; msg['To']=', '.join(RECIPIENTS)
+    msg=MIMEMultipart('alternative'); msg['Subject']=f"Private Market Deal Monitor — {datetime.now().strftime('%d %b %Y')}"; msg['From']=sender; msg['To']=', '.join(RECIPIENTS)
     msg.attach(MIMEText(email_html(rows()),'html'))
     with smtplib.SMTP(host,port,timeout=20) as s:
         s.starttls(); s.login(user,password); s.sendmail(sender,RECIPIENTS,msg.as_string())
