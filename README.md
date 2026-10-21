@@ -1,6 +1,6 @@
 # Private Market Deal Monitor
 
-MVP dashboard and email-report service for Clarity (formerly Hiive), Nasdaq Private Market, Forge and EquityZen.
+Private-market dashboard and email-report service using a captured EquityZen available-listings snapshot.
 
 ## Run
 ```bash
@@ -33,16 +33,20 @@ The MVP deliberately does not guess undocumented commercial API endpoints. Repla
 6. Add SSO/RBAC and audit logs for AIMS use.
 
 ## Primary source
-EquityZen is the primary source, with Forge observations as secondary coverage.
-Provider feed placeholders are excluded from the company list. The site and email
-preview omit platform and provider-product columns. Internal CSV source fields
-remain available for provenance.
+The bundled `data/equityzen_available.json` contains a dated snapshot of 60
+companies marked Live on the authenticated available-listings page on 21 Oct
+2026. Pagination failed and the source subsequently denied access, so coverage
+is partial. No automatic refresh or account credentials are included.
 
-By default, Databricks and Stripe appear as unpriced public company references
-from https://equityzen.com/multi-company/, not active investment offers.
-Set `EQUITYZEN_DATA_FILE` to a server-local JSON export approved for use on this
-site to load actual company records. The file must contain an array of objects
-with `company`; optional fields match the CSV schema (numeric prices in USD,
-`updated`, `source`, `share_class`, etc.). EquityZen records take precedence over
-secondary observations for the same company. A configured invalid file fails
-explicitly instead of silently serving fallback data. No undocumented API is used.
+Share prices, where present, were read from Explore cards in the same session
+and matched by company URL and displayed implied valuation. They are indicative
+company-level observations, not verified terms for every live offering. Missing
+prices remain null. The UI and email disclose snapshot limits, USD units and
+implied valuation. Historical Forge observations are no longer mixed into the
+available listings.
+
+Set `EQUITYZEN_DATA_FILE` to a server-local JSON array to replace this snapshot.
+Each record requires `company`; optional fields match the CSV schema. Separate
+offering records are preserved. Unknown fields are ignored and invalid numeric
+values fail explicitly. Source URLs and observation timestamps are retained in
+CSV for provenance; provider names are hidden from the site and email.

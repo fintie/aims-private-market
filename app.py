@@ -1,5 +1,7 @@
 from flask import Flask, render_template_string, request, Response
 from datetime import datetime, timezone
+from pathlib import Path
+from markupsafe import escape
 import csv, io, json, os, smtplib, requests
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -8,17 +10,8 @@ app = Flask(__name__)
 DEFAULT_RECIPIENTS = ['nickq@aims.com.au', 'nickc@aims.com.au', 'augustine.goh@aims.com.au']
 RECIPIENTS = [x.strip() for x in os.getenv('REPORT_RECIPIENTS', ','.join(DEFAULT_RECIPIENTS)).split(',') if x.strip()]
 
-PUBLIC_DATA = [
- {'company':'Databricks','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':268.50,'bid':None,'ask':None,'deal_size':None,'valuation':201640000000,'last_funding':'Series L-2 — 13 Aug 2026 — $190B — $253.00 PPS','discount':None,'activity':'High','updated':'Forge Price updated 28 Sep 2026','source':'https://forgeglobal.com/databricks_stock/'},
- {'company':'Stripe','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':72.45,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Tender Offer 3 — 24 Feb 2026 — $159B — $62.47 PPS','discount':None,'activity':'Limited','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'Saronic','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':34.29,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series D — 31 Mar 2026 — $9.25B — $27.45 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'Polymarket','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':137.70,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series E — 26 Mar 2026 — $15B — $144.08 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'Replit','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':259.43,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series D — 11 Mar 2026 — $9B — $248.26 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'SambaNova Systems','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':69.01,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series F Voting — 8 Jul 2026 — $11B — $127.10 PPS','discount':None,'activity':'High','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'Ramp','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':125.54,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Series F — 4 Jun 2026 — $44B — $120.00 PPS','discount':None,'activity':'Medium','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
- {'company':'Rippling','platform':'Forge','product':'Forge Price / Marketplace','deal_type':'Public market observation','share_class':'—','price':47.28,'bid':None,'ask':None,'deal_size':None,'valuation':None,'last_funding':'Tender Offer 1 — 9 May 2025 — $16.8B — $52.00 PPS','discount':None,'activity':'Low','updated':'Public Forge snapshot 1 Oct 2026','source':'https://forgeglobal.com/'},
+BASE_FIELDS = ('company', 'platform', 'product', 'deal_type', 'share_class', 'price', 'bid', 'ask', 'deal_size', 'valuation', 'last_funding', 'discount', 'activity', 'updated', 'source')
 
-]
 def npm_status():
     key = os.getenv('NPM_API_KEY', '').strip()
     if not key:
@@ -76,53 +69,52 @@ def npm_status():
         status['message'] = str(e)
     return status
 
-# EquityZen is the primary source. Public references are company coverage,
-# not offers or price quotes. Approved exports can supply actual deal terms.
 PRIMARY_SOURCE = 'EquityZen'
-EQUITYZEN_REFERENCES = [
-    dict(company=company, platform=PRIMARY_SOURCE, product='Single-company investment',
-         deal_type='Company reference', share_class='—', price=None, bid=None,
-         ask=None, deal_size=None, valuation=None, last_funding='—', discount=None,
-         activity='Terms unavailable', updated='Public company reference; no live quote',
-         source='https://equityzen.com/multi-company/')
-    for company in ('Databricks', 'Stripe')
-]
+SNAPSHOT_NOTE = ('Available-listings snapshot captured 21 Oct 2026. '
+                 '60 companies captured; coverage is partial because the source stopped loading. '
+                 'Availability may have changed. Prices and implied valuations are indicative, '
+                 'in USD, and may refer to different offerings. Missing prices are shown as —. '
+                 'This snapshot does not refresh automatically.')
+DEFAULT_FEED = Path(__file__).parent / 'data' / 'equityzen_available.json'
+ROW_FIELDS = BASE_FIELDS + ('price_source', 'valuation_type', 'availability_source', 'observed_at')
 
 def rows():
-    feed_path = os.getenv('EQUITYZEN_DATA_FILE', '').strip()
-    primary = EQUITYZEN_REFERENCES
-    if feed_path:
-        with open(feed_path, encoding='utf-8') as feed:
-            records = json.load(feed)
-        if not isinstance(records, list):
-            raise ValueError('EQUITYZEN_DATA_FILE must contain a JSON array of company records')
-        primary = []
-        for record in records:
-            if not isinstance(record, dict) or not isinstance(record.get('company'), str) or not record['company'].strip():
-                raise ValueError('Each company record must include a company name')
-            if 'equityzen' in record['company'].casefold():
-                continue
-            row = {key: None for key in PUBLIC_DATA[0]}
-            row.update(record)
-            row['platform'] = PRIMARY_SOURCE
-            row['product'] = 'Single-company investment'
-            row['deal_type'] = record.get('deal_type') or 'Private-market investment'
-            row['activity'] = record.get('activity') or '—'
-            row['updated'] = record.get('updated') or 'Timestamp unavailable'
-            row['share_class'] = record.get('share_class') or '—'
-            primary.append(row)
-    covered = {row['company'].strip().casefold() for row in primary}
-    return primary + [row for row in PUBLIC_DATA if row['company'].casefold() not in covered]
+    feed_path = os.getenv('EQUITYZEN_DATA_FILE', '').strip() or DEFAULT_FEED
+    with open(feed_path, encoding='utf-8') as feed:
+        records = json.load(feed)
+    if not isinstance(records, list):
+        raise ValueError('EQUITYZEN_DATA_FILE must contain a JSON array of company records')
+    result = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get('company'), str) or not record['company'].strip():
+            raise ValueError('Each company record must include a company name')
+        if 'equityzen' in record['company'].casefold():
+            continue
+        row = {key: record.get(key) for key in ROW_FIELDS}
+        for key in ('price', 'bid', 'ask', 'deal_size', 'valuation'):
+            value = row[key]
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
+                raise ValueError(f'{key} must be a non-negative number or null')
+        if row['valuation'] == 0:
+            row['valuation'] = None
+        row['platform'] = PRIMARY_SOURCE
+        row['product'] = 'Single-company investment'
+        row['deal_type'] = record.get('deal_type') or 'Private-market investment'
+        row['activity'] = record.get('activity') or 'Availability unverified'
+        row['updated'] = record.get('updated') or 'Timestamp unavailable'
+        row['share_class'] = record.get('share_class') or '—'
+        result.append(row)
+    return result
 
 def money(v):
     return '—' if v is None else '${:,.2f}'.format(v)
 
 def email_html(data):
-    trs=''.join(f"<tr><td>{r['company']}</td><td>{r['deal_type']}</td><td>{money(r['price'])}</td><td>{money(r['bid'])}</td><td>{money(r['ask'])}</td><td>{r['activity']}</td><td>{r['updated']}</td></tr>" for r in data)
-    return f'''<h2>Private Market Deal Monitor</h2><p>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p><table border="1" cellpadding="7" cellspacing="0" style="border-collapse:collapse;font-family:Arial;font-size:12px"><tr style="background:#10243e;color:white"><th>Company</th><th>Deal Type</th><th>Price</th><th>Bid</th><th>Ask</th><th>Activity</th><th>Updated</th></tr>{trs}</table><p><small>Private-market prices may be indicative. Verify source, share class, transfer restrictions and timestamp before use.</small></p>'''
+    trs=''.join(f"<tr><td>{escape(r['company'])}</td><td>{escape(r['deal_type'])}</td><td>{money(r['price'])}</td><td>{money(r['valuation'])}</td><td>{money(r['bid'])}</td><td>{money(r['ask'])}</td><td>{escape(r['activity'])}</td><td>{escape(r['updated'])}</td></tr>" for r in data)
+    return f'''<h2>Private Market Deal Monitor</h2><p>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p><table border="1" cellpadding="7" cellspacing="0" style="border-collapse:collapse;font-family:Arial;font-size:12px"><tr style="background:#10243e;color:white"><th>Company</th><th>Deal Type</th><th>Share Price (USD)</th><th>Implied Valuation (USD)</th><th>Bid</th><th>Ask</th><th>Activity</th><th>Updated</th></tr>{trs}</table><p><small>{escape(SNAPSHOT_NOTE)}</small></p>'''
 
 PAGE='''<!doctype html><html><head><meta charset="utf-8"><title>Private Market Monitor</title><style>
-body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background:#10243e;color:white;padding:24px 34px}.wrap{padding:24px 34px}.cards{display:flex;gap:14px;margin-bottom:18px}.card{background:white;padding:16px;border-radius:10px;box-shadow:0 1px 5px #ccd5e0;min-width:180px}.n{font-size:26px;font-weight:bold}.actions{margin:14px 0}.btn{background:#286cf5;color:white;border:0;border-radius:6px;padding:10px 14px;text-decoration:none;margin-right:8px}table{width:100%;border-collapse:collapse;background:white;font-size:13px}th{background:#10243e;color:white;text-align:left;padding:10px}td{padding:9px;border-bottom:1px solid #e5e7eb}.note{color:#64748b;font-size:12px;margin-top:14px}</style></head><body><div class="top"><h1>Private Market Deal Monitor</h1><div>Private company investment opportunities</div></div><div class="wrap"><div class="cards"><div class="card"><div class="n">{{data|length}}</div>Rows</div></div><div class="actions"><a class="btn" href="/export.csv">Export CSV</a><a class="btn" href="/email-preview">Email Preview</a></div><table><tr><th>Company</th><th>Deal Type</th><th>Share Class</th><th>Price</th><th>Bid</th><th>Ask</th><th>Deal Size</th><th>Valuation</th><th>Activity</th><th>Updated</th></tr>{% for r in data %}<tr><td>{{r.company}}</td><td>{{r.deal_type}}</td><td>{{r.share_class}}</td><td>{{money(r.price)}}</td><td>{{money(r.bid)}}</td><td>{{money(r.ask)}}</td><td>{{money(r.deal_size)}}</td><td>{{money(r.valuation)}}</td><td>{{r.activity}}</td><td>{{r.updated}}</td></tr>{% endfor %}</table><div class="note">Company references are not active offers. Prices are unavailable where approved deal data has not been supplied. Do not treat indicative private-market data as an executable quote.</div></div></body></html>'''
+body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background:#10243e;color:white;padding:24px 34px}.wrap{padding:24px 34px}.cards{display:flex;gap:14px;margin-bottom:18px}.card{background:white;padding:16px;border-radius:10px;box-shadow:0 1px 5px #ccd5e0;min-width:180px}.n{font-size:26px;font-weight:bold}.actions{margin:14px 0}.btn{background:#286cf5;color:white;border:0;border-radius:6px;padding:10px 14px;text-decoration:none;margin-right:8px}table{width:100%;border-collapse:collapse;background:white;font-size:13px}th{background:#10243e;color:white;text-align:left;padding:10px}td{padding:9px;border-bottom:1px solid #e5e7eb}.note{color:#64748b;font-size:12px;margin-top:14px}</style></head><body><div class="top"><h1>Private Market Deal Monitor</h1><div>Private company investment opportunities</div></div><div class="wrap"><div class="cards"><div class="card"><div class="n">{{data|length}}</div>Rows</div></div><div class="actions"><a class="btn" href="/export.csv">Export CSV</a><a class="btn" href="/email-preview">Email Preview</a></div><table><tr><th>Company</th><th>Deal Type</th><th>Share Class</th><th>Share Price (USD)</th><th>Bid</th><th>Ask</th><th>Deal Size</th><th>Implied Valuation (USD)</th><th>Activity</th><th>Updated</th></tr>{% for r in data %}<tr><td>{{r.company}}</td><td>{{r.deal_type}}</td><td>{{r.share_class}}</td><td>{{money(r.price)}}</td><td>{{money(r.bid)}}</td><td>{{money(r.ask)}}</td><td>{{money(r.deal_size)}}</td><td>{{money(r.valuation)}}</td><td>{{r.activity}}</td><td>{{r.updated}}</td></tr>{% endfor %}</table><div class="note">{{snapshot_note}}</div></div></body></html>'''
 
 @app.route('/health')
 def health(): return {'ok': True, 'service': 'private-market'}
@@ -132,11 +124,11 @@ def npm_status_route():
     return npm_status()
 
 @app.route('/')
-def home(): return render_template_string(PAGE,data=rows(),recipient=', '.join(RECIPIENTS),money=money)
+def home(): return render_template_string(PAGE,data=rows(),recipient=', '.join(RECIPIENTS),money=money,snapshot_note=SNAPSHOT_NOTE)
 
 @app.route('/export.csv')
 def export_csv():
-    data=rows(); buf=io.StringIO(); w=csv.DictWriter(buf,fieldnames=data[0].keys()); w.writeheader(); w.writerows(data)
+    data=rows(); buf=io.StringIO(); w=csv.DictWriter(buf,fieldnames=ROW_FIELDS); w.writeheader(); w.writerows(data)
     return Response(buf.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=private_market_deals.csv'})
 
 @app.route('/email-preview')
