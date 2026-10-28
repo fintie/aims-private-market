@@ -50,3 +50,14 @@ Each record requires `company`; optional fields match the CSV schema. Separate
 offering records are preserved. Unknown fields are ignored and invalid numeric
 values fail explicitly. Source URLs and observation timestamps are retained in
 CSV for provenance; provider names are hidden from the site and email.
+
+## Product and deal interface
+The home page groups records by company and product, with company/product search.
+Opening a product shows its separate captured deal records with deal type, share
+class, implied share price, implied valuation, premium/discount to last valuation,
+minimum investment and time to close. Existing company observations are labelled
+indicative; unknown terms display “Not available”. `deal_size` is not treated as
+minimum investment. Optional feed fields are `minimum_investment` (USD number),
+`time_to_close` (display text), `last_valuation` (USD number), and `terms_verified`
+(boolean). Premium/discount is calculated as `(valuation / last_valuation - 1)`
+only when `terms_verified` is true, confirming comparable offering terms.

@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, Response
+from flask import Flask, render_template, request, Response, abort, url_for
 from datetime import datetime, timezone
 from pathlib import Path
 from markupsafe import escape
@@ -76,7 +76,7 @@ SNAPSHOT_NOTE = ('Available-listings snapshot captured 21 Oct 2026. '
                  'in USD, and may refer to different offerings. Missing prices are shown as —. '
                  'This snapshot does not refresh automatically.')
 DEFAULT_FEED = Path(__file__).parent / 'data' / 'equityzen_available.json'
-ROW_FIELDS = BASE_FIELDS + ('price_source', 'valuation_type', 'availability_source', 'observed_at')
+ROW_FIELDS = BASE_FIELDS + ('price_source', 'valuation_type', 'availability_source', 'observed_at', 'minimum_investment', 'time_to_close', 'last_valuation', 'terms_verified')
 
 def rows():
     feed_path = os.getenv('EQUITYZEN_DATA_FILE', '').strip() or DEFAULT_FEED
@@ -91,14 +91,14 @@ def rows():
         if 'equityzen' in record['company'].casefold():
             continue
         row = {key: record.get(key) for key in ROW_FIELDS}
-        for key in ('price', 'bid', 'ask', 'deal_size', 'valuation'):
+        for key in ('price', 'bid', 'ask', 'deal_size', 'valuation', 'minimum_investment', 'last_valuation'):
             value = row[key]
             if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0):
                 raise ValueError(f'{key} must be a non-negative number or null')
         if row['valuation'] == 0:
             row['valuation'] = None
         row['platform'] = PRIMARY_SOURCE
-        row['product'] = 'Single-company investment'
+        row['product'] = record.get('product') or 'Single-company investment'
         row['deal_type'] = record.get('deal_type') or 'Private-market investment'
         row['activity'] = record.get('activity') or 'Availability unverified'
         row['updated'] = record.get('updated') or 'Timestamp unavailable'
@@ -113,8 +113,21 @@ def email_html(data):
     trs=''.join(f"<tr><td>{escape(r['company'])}</td><td>{escape(r['deal_type'])}</td><td>{money(r['price'])}</td><td>{money(r['valuation'])}</td><td>{money(r['bid'])}</td><td>{money(r['ask'])}</td><td>{escape(r['activity'])}</td><td>{escape(r['updated'])}</td></tr>" for r in data)
     return f'''<h2>Private Market Deal Monitor</h2><p>Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</p><table border="1" cellpadding="7" cellspacing="0" style="border-collapse:collapse;font-family:Arial;font-size:12px"><tr style="background:#10243e;color:white"><th>Company</th><th>Deal Type</th><th>Share Price (USD)</th><th>Implied Valuation (USD)</th><th>Bid</th><th>Ask</th><th>Activity</th><th>Updated</th></tr>{trs}</table><p><small>{escape(SNAPSHOT_NOTE)}</small></p>'''
 
-PAGE='''<!doctype html><html><head><meta charset="utf-8"><title>Private Market Monitor</title><style>
-body{font-family:Arial;margin:0;background:#f4f7fb;color:#14213d}.top{background:#10243e;color:white;padding:24px 34px}.wrap{padding:24px 34px}.cards{display:flex;gap:14px;margin-bottom:18px}.card{background:white;padding:16px;border-radius:10px;box-shadow:0 1px 5px #ccd5e0;min-width:180px}.n{font-size:26px;font-weight:bold}.actions{margin:14px 0}.btn{background:#286cf5;color:white;border:0;border-radius:6px;padding:10px 14px;text-decoration:none;margin-right:8px}table{width:100%;border-collapse:collapse;background:white;font-size:13px}th{background:#10243e;color:white;text-align:left;padding:10px}td{padding:9px;border-bottom:1px solid #e5e7eb}.note{color:#64748b;font-size:12px;margin-top:14px}</style></head><body><div class="top"><h1>Private Market Deal Monitor</h1><div>Private company investment opportunities</div></div><div class="wrap"><div class="cards"><div class="card"><div class="n">{{data|length}}</div>Rows</div></div><div class="actions"><a class="btn" href="/export.csv">Export CSV</a><a class="btn" href="/email-preview">Email Preview</a></div><table><tr><th>Company</th><th>Deal Type</th><th>Share Class</th><th>Share Price (USD)</th><th>Bid</th><th>Ask</th><th>Deal Size</th><th>Implied Valuation (USD)</th><th>Activity</th><th>Updated</th></tr>{% for r in data %}<tr><td>{{r.company}}</td><td>{{r.deal_type}}</td><td>{{r.share_class}}</td><td>{{money(r.price)}}</td><td>{{money(r.bid)}}</td><td>{{money(r.ask)}}</td><td>{{money(r.deal_size)}}</td><td>{{money(r.valuation)}}</td><td>{{r.activity}}</td><td>{{r.updated}}</td></tr>{% endfor %}</table><div class="note">{{snapshot_note}}</div></div></body></html>'''
+def products(data):
+    grouped = {}
+    for row in data:
+        key = (row['company'], row['product'])
+        grouped.setdefault(key, []).append(row)
+    return [dict(id=i, company=key[0], product=key[1], deals=deals)
+            for i, (key, deals) in enumerate(grouped.items())]
+
+
+def premium(row):
+    # Only compare values explicitly verified as terms of the same offering.
+    if row['terms_verified'] is True and row['valuation'] is not None and row['last_valuation']:
+        value = (row['valuation'] / row['last_valuation'] - 1) * 100
+        return f'{abs(value):.1f}% ' + ('discount' if value < 0 else 'premium' if value > 0 else 'at last valuation')
+    return 'Not available'
 
 @app.route('/health')
 def health(): return {'ok': True, 'service': 'private-market'}
@@ -124,7 +137,19 @@ def npm_status_route():
     return npm_status()
 
 @app.route('/')
-def home(): return render_template_string(PAGE,data=rows(),recipient=', '.join(RECIPIENTS),money=money,snapshot_note=SNAPSHOT_NOTE)
+def home():
+    data = rows()
+    return render_template('market.html', products=products(data), selected=None,
+                           count=len(data), money=money, premium=premium, snapshot_note=SNAPSHOT_NOTE)
+
+@app.route('/products/<int:product_id>')
+def product_detail(product_id):
+    data = rows()
+    catalog = products(data)
+    if product_id >= len(catalog):
+        abort(404)
+    return render_template('market.html', products=catalog, selected=catalog[product_id],
+                           count=len(data), money=money, premium=premium, snapshot_note=SNAPSHOT_NOTE)
 
 @app.route('/export.csv')
 def export_csv():
